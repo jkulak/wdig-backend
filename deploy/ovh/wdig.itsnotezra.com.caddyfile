@@ -1,0 +1,16 @@
+# wdig.itsnotezra.com on the shared edge, started from gcloud-ovh-migrate's service template and
+# installed to /srv/edge/sites/ by `make ovh-install`. DNS only, not proxied by Cloudflare; a
+# proxied name adds `import cloudflare_only` and moves as CONTRACT.md §10 describes.
+wdig.itsnotezra.com {
+	import access_log
+	import security_headers
+	import compress
+	# The live colour's upstream, which ci-deploy rewrites as it moves the edge from one colour
+	# to the other (CONTRACT.md §3); `make ovh-install` creates it before this snippet arrives.
+	import ../live/wdig.caddyfile
+
+	# Until the name's DNS points at the host the edge cannot prove it, and failed attempts
+	# lock a name out of Let's Encrypt. Delete this line once the record has moved; the real
+	# certificate follows within seconds (CONTRACT.md §10).
+	tls internal
+}

@@ -1,0 +1,49 @@
+# The one job a pull request runs: format, clippy, tests against Postgres. Nothing runs on
+# the push a merge makes to main; the release workflow (deploy/ovh) takes it from there.
+name: CI
+
+on:
+  pull_request:
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "issues/**"
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: wdig
+          POSTGRES_PASSWORD: wdig
+          POSTGRES_DB: wdig_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U wdig -d wdig_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgres://wdig:wdig@localhost:5432/wdig_test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable, 2026-10
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Apply the migrations
+        run: |
+          sudo apt-get install -y --no-install-recommends postgresql-client >/dev/null
+          for f in migrations/*.up.sql; do psql -v ON_ERROR_STOP=1 -q --single-transaction "$DATABASE_URL" -f "$f"; done
+      - run: cargo test --all-features
