@@ -1,0 +1,153 @@
+name: Deploy
+
+# Every release, rolled out on the shared OVH host: build the images named in
+# deploy/ovh/service.env, push them to this repository's registry with the run's own token,
+# and roll them out with scripts/ovh-release.sh — `deploy <service> <tag>`, the service's smoke
+# test, and the release before when that fails. From gcloud-ovh-migrate's service template,
+# word for word the same in every service. A merge to main is released by release.yml, which
+# dispatches this against the new tag; a release cut by hand, `gh release create v…`, starts it
+# through its own event.
+#
+# A release is a tag, never a branch, and three things say so independently: the plan job
+# refuses any other ref, the `production` environment admits `v*` tags only, and `ci-deploy`
+# on the host accepts release tags alone. `workflow_dispatch` against an earlier tag is how
+# that release is put back.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+# A deploy stopped halfway is worse than one that waits.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: Read what to build
+    runs-on: ubuntu-latest
+    outputs:
+      service: ${{ steps.read.outputs.service }}
+      images: ${{ steps.read.outputs.images }}
+    steps:
+      - name: Refuse a ref nobody released
+        if: ${{ github.ref_type != 'tag' }}
+        run: |
+          echo "::error::A release is a tag. Dispatch this against a v* tag, not ${{ github.ref }}."
+          exit 1
+
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Read deploy/ovh/service.env
+        id: read
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          [[ "$TAG" =~ ^v[0-9][0-9A-Za-z._-]*$ ]] || { echo "::error::$TAG is not a release tag"; exit 1; }
+          # shellcheck source=/dev/null
+          . deploy/ovh/service.env
+          [[ "$SERVICE" =~ ^[a-z][a-z0-9-]*$ ]] || { echo "::error::deploy/ovh/service.env names no SERVICE"; exit 1; }
+          echo "service=$SERVICE" >> "$GITHUB_OUTPUT"
+          # name=context:dockerfile[:target], one image per entry.
+          matrix=$(for spec in ${IMAGES:-}; do
+            name=${spec%%=*} rest=${spec#*=}; context=${rest%%:*} rest=${rest#*:}
+            dockerfile=${rest%%:*} target=; [ "$rest" = "$dockerfile" ] || target=${rest#*:}
+            printf '{"name":"%s","context":"%s","dockerfile":"%s","target":"%s"}\n' \
+              "$name" "$context" "$dockerfile" "$target"
+          done | jq -sc .)
+          [ "$matrix" != "[]" ] || { echo "::error::deploy/ovh/service.env names no IMAGES"; exit 1; }
+          echo "images=$matrix" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build and push ${{ matrix.image.name }}
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        image: ${{ fromJSON(needs.plan.outputs.images) }}
+    env:
+      # Where the image lives in the registry: its release tags, and its layer cache.
+      IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.image.name }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      # With this run's own token, which can write this repository's packages and nothing
+      # else: no registry credential to keep anywhere.
+      - name: Log in to GitHub's registry
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
+
+      # Tagged with the release itself, so the host can say which release it runs; the
+      # version is a build argument, so the image carries it wherever it starts.
+      - name: Build and push the image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
+        with:
+          context: ${{ matrix.image.context }}
+          file: ${{ matrix.image.context }}/${{ matrix.image.dockerfile }}
+          # One stage of a multi-stage Dockerfile, or the last when service.env names none.
+          target: ${{ matrix.image.target }}
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            APP_VERSION=${{ github.ref_name }}
+          # Where the image came from, at which commit and release, readable on the host with
+          # `docker image inspect` long after the run is gone.
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+          tags: ${{ env.IMAGE }}:${{ github.ref_name }}
+          # The layers come from the release before and go to the next through the registry,
+          # beside the image: GitHub's Actions cache is kept per ref, a release's ref is its tag,
+          # and no later release could read it.
+          cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache
+          cache-to: type=registry,ref=${{ env.IMAGE }}:buildcache,mode=max
+
+  deploy:
+    name: Roll out on the host
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    # Holds the deploy key and admits v* tags alone, on GitHub's side of the line.
+    environment: production
+    steps:
+      # The release script and the service's smoke test come from the release itself.
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      # The host's key is pinned: a connection to anything else claiming its address is
+      # refused rather than trusted. The deploy key opens nothing but `ci-deploy`.
+      - name: Hold the host's key and the deploy key
+        env:
+          HOST_KEY: ${{ secrets.OVH_HOST_KEY }}
+          DEPLOY_KEY: ${{ secrets.OVH_DEPLOY_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$HOST_KEY" > ~/.ssh/known_hosts
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/ovh-deploy && chmod 600 ~/.ssh/ovh-deploy
+
+      # ci-deploy pulls, rolls the stack, waits for it to be healthy and puts the last good
+      # release back if it is not; then deploy/ovh/smoke.sh, and when that fails the release
+      # before goes back (CONTRACT.md §6). This step fails either way.
+      - name: Roll out on the host and smoke-test it
+        env:
+          OVH_HOST: ${{ secrets.OVH_HOST }}
+          # Through the environment rather than pasted into the script: a tag name may hold
+          # characters a shell would act on.
+          TAG: ${{ github.ref_name }}
+        run: ./scripts/ovh-release.sh "$TAG"
+
+      - name: Deployment summary
+        env:
+          SERVICE: ${{ needs.plan.outputs.service }}
+        run: echo "### ${SERVICE} ${{ github.ref_name }} on the OVH host" >> "$GITHUB_STEP_SUMMARY"

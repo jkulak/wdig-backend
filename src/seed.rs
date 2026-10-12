@@ -1,7 +1,12 @@
-//! A made-up month for an account: the days before any phone has recorded, so the app and
-//! the API have something to show. The shape is an ordinary life around a home: weekdays to
-//! work and back, an evening walk now and then, weekends with a long walk, a ride or a drive.
-//! Everything is deterministic for a given seed, and `--replace` removes the previous run.
+//! A made-up month for an account, over real streets: the routes come from Apple Maps
+//! directions between real places in Warsaw (`fixtures/demo_routes.json`, written by the app's
+//! `scripts/demo-routes.swift`), and the points along them are sampled the way the recorder
+//! keeps fixes: 10 m on foot, 25 m on a bike, 50 m in a car or every 60 s, with the first
+//! hundred metres from the door missing, GPS noise and a stop's few warm-phase fixes. The
+//! app's demo month reads the same file, so a phone and a server tell the same story.
+//! Deterministic for a given seed; `--replace` removes the previous run.
+
+use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Datelike, Duration, NaiveDate, TimeZone, Utc, Weekday};
@@ -9,10 +14,16 @@ use chrono_tz::Tz;
 use clap::Args;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+use serde::Deserialize;
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::partitions;
+
+const ROUTES_JSON: &str = include_str!("../fixtures/demo_routes.json");
+const SEED_DEVICE_NAME: &str = "seed";
+const SCALE: f64 = 10_000_000.0;
+const DOOR_GAP_M: f64 = 120.0;
 
 #[derive(Args, Debug)]
 pub struct SeedArgs {
@@ -22,11 +33,6 @@ pub struct SeedArgs {
     /// How many days back from today
     #[arg(long, default_value_t = 30)]
     pub days: u32,
-    /// Home, where every day starts and ends
-    #[arg(long, default_value_t = 52.2297)]
-    pub lat: f64,
-    #[arg(long, default_value_t = 21.0122)]
-    pub lon: f64,
     /// The IANA time zone the days are in
     #[arg(long, default_value = "Europe/Warsaw")]
     pub tz: String,
@@ -38,8 +44,49 @@ pub struct SeedArgs {
     pub seed: u64,
 }
 
-const SEED_DEVICE_NAME: &str = "seed";
-const SCALE: f64 = 10_000_000.0;
+#[derive(Deserialize)]
+struct Routes {
+    places: HashMap<String, PlaceSpec>,
+    legs: HashMap<String, LegSpec>,
+}
+
+#[derive(Deserialize)]
+struct PlaceSpec {
+    lat: f64,
+    lon: f64,
+}
+
+#[derive(Deserialize)]
+struct LegSpec {
+    /// Apple Maps' length of the leg; the tests check the sampled length against it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[serde(rename = "distanceM")]
+    distance_m: i64,
+    coordinates: Vec<[f64; 2]>,
+}
+
+impl Routes {
+    fn load() -> Result<Routes> {
+        serde_json::from_str(ROUTES_JSON).context("fixtures/demo_routes.json does not parse")
+    }
+
+    fn place(&self, key: &str) -> Geo {
+        self.places
+            .get(key)
+            .map(|p| Geo {
+                lat: p.lat,
+                lon: p.lon,
+            })
+            .unwrap_or(Geo {
+                lat: 52.2288,
+                lon: 21.0168,
+            })
+    }
+
+    fn leg(&self, from: &str, to: &str, mode: &str) -> Option<&LegSpec> {
+        self.legs.get(&format!("{from}-{to}-{mode}"))
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 struct Geo {
@@ -49,9 +96,10 @@ struct Geo {
 
 impl Geo {
     fn offset(self, north_m: f64, east_m: f64) -> Geo {
-        let lat = self.lat + north_m / 111_320.0;
-        let lon = self.lon + east_m / (111_320.0 * self.lat.to_radians().cos());
-        Geo { lat, lon }
+        Geo {
+            lat: self.lat + north_m / 111_320.0,
+            lon: self.lon + east_m / (111_320.0 * self.lat.to_radians().cos()),
+        }
     }
 
     fn distance(self, other: Geo) -> f64 {
@@ -93,7 +141,7 @@ impl Mode {
             Mode::Walk => 1.4,
             Mode::Run => 2.9,
             Mode::Bike => 5.5,
-            Mode::Car => 11.0,
+            Mode::Car => 9.0,
         }
     }
 
@@ -103,6 +151,10 @@ impl Mode {
             Mode::Bike => 25.0,
             Mode::Car => 50.0,
         }
+    }
+
+    fn noise_m(self) -> f64 {
+        if self == Mode::Car { 6.0 } else { 3.0 }
     }
 
     /// `activity` class code: 2 walking, 3 running, 4 cycling, 5 automotive.
@@ -130,6 +182,15 @@ impl Mode {
             Mode::Run => "run",
             Mode::Bike => "bike",
             Mode::Car => "car",
+        }
+    }
+
+    /// The leg to route on: runs follow the walking routes.
+    fn leg_mode(self) -> &'static str {
+        if self == Mode::Run {
+            "walk"
+        } else {
+            self.mode_type()
         }
     }
 }
@@ -160,90 +221,76 @@ struct Day {
     segments: Vec<Segment>,
 }
 
-/// A trip from `from` to `to` by `mode`, as a gently curved line of points at the mode's
-/// spacing, with the speed and the course of each point and a little position noise.
-fn trip(
-    rng: &mut StdRng,
-    from: Geo,
-    to: Geo,
+struct Visit {
+    place: &'static str,
     mode: Mode,
-    start: DateTime<Utc>,
-) -> (Vec<Point>, Segment) {
-    let straight = from.distance(to).max(50.0);
-    // Two waypoints off the straight line make the route look like streets, not a ruler.
-    let bend = straight * 0.12;
-    let bearing = from.bearing(to).to_radians();
-    let side = |geo: Geo, along: f64, off: f64| -> Geo {
-        let north = along * bearing.cos() - off * bearing.sin();
-        let east = along * bearing.sin() + off * bearing.cos();
-        geo.offset(north, east)
+    stay_s: i64,
+}
+
+/// Where the day goes, in order, by the weekday and the dice; the day starts and ends at home.
+fn plan(rng: &mut StdRng, weekend: bool) -> (i64, Vec<Visit>) {
+    let mut visits = Vec::new();
+    let visit = |place, mode, stay_s| Visit {
+        place,
+        mode,
+        stay_s,
     };
-    let w1 = side(from, straight * 0.33, rng.random_range(-bend..bend));
-    let w2 = side(from, straight * 0.66, rng.random_range(-bend..bend));
-    let legs = [(from, w1), (w1, w2), (w2, to)];
-    let mut points = Vec::new();
-    let mut at = start;
-    let mut distance = 0.0;
-    let speed = mode.speed_mps();
-    for (a, b) in legs {
-        let length = a.distance(b);
-        let steps = (length / mode.spacing_m()).ceil().max(1.0) as usize;
-        for index in 0..steps {
-            let fraction = index as f64 / steps as f64;
-            let leg_bearing = a.bearing(b).to_radians();
-            let along = fraction * length;
-            let noise = rng.random_range(-3.0..3.0);
-            let geo = a.offset(
-                along * leg_bearing.cos() + noise * leg_bearing.sin(),
-                along * leg_bearing.sin() - noise * leg_bearing.cos(),
-            );
-            let variation = rng.random_range(0.75..1.25);
-            let point_speed = if mode == Mode::Car && rng.random_range(0.0..1.0) < 0.08 {
-                0.0
-            } else {
-                speed * variation
-            };
-            points.push(Point {
-                at,
-                geo,
-                h_acc: rng.random_range(4..16),
-                speed_cms: (point_speed * 100.0).round() as i16,
-                course: a.bearing(b).round() as i16 % 360,
-                activity: mode.activity(),
-                activity_conf: if rng.random_range(0.0..1.0) < 0.85 {
-                    2
-                } else {
-                    1
-                },
-            });
-            let step_m = length / steps as f64;
-            distance += step_m;
-            let seconds =
-                step_m / point_speed.max(0.5) + if point_speed == 0.0 { 20.0 } else { 0.0 };
-            at += Duration::milliseconds((seconds * 1000.0) as i64);
+    if weekend {
+        let roll: f64 = rng.random_range(0.0..1.0);
+        if roll < 0.3 {
+            visits.push(visit("vistula", Mode::Bike, 5 * 60));
+            visits.push(visit("lomianki", Mode::Bike, 45 * 60));
+            visits.push(visit("vistula", Mode::Bike, 10 * 60));
+            visits.push(visit("home", Mode::Bike, 0));
+        } else if roll < 0.55 {
+            visits.push(visit("oldTown", Mode::Walk, 90 * 60));
+            visits.push(visit("home", Mode::Walk, 0));
+        } else if roll < 0.75 {
+            visits.push(visit("zloteTarasy", Mode::Walk, 100 * 60));
+            visits.push(visit("home", Mode::Walk, 0));
+        } else if roll < 0.9 {
+            visits.push(visit("lazienki", Mode::Run, 4 * 60));
+            visits.push(visit("home", Mode::Run, 0));
+        } else {
+            visits.push(visit("vistula", Mode::Walk, 40 * 60));
+            visits.push(visit("home", Mode::Walk, 0));
         }
+        visits.push(visit("home", Mode::Walk, rng.random_range(60..120) * 60));
+        if rng.random_range(0.0..1.0) < 0.4 {
+            if rng.random_range(0.0..1.0) < 0.5 {
+                visits.push(visit("kinoteka", Mode::Walk, 150 * 60));
+            } else {
+                visits.push(visit("koszyki", Mode::Walk, 60 * 60));
+            }
+            visits.push(visit("home", Mode::Walk, 0));
+        }
+        return (10 * 3600 + rng.random_range(-30..30) * 60, visits);
     }
-    let end = at;
-    let steps = match mode {
-        Mode::Walk => Some((distance / 0.75) as i32),
-        Mode::Run => Some((distance / 1.1) as i32),
-        _ => None,
-    };
-    let segment = Segment {
-        kind: "trip",
-        start,
-        end,
-        mode: Some(mode),
-        distance_m: distance.round() as i32,
-        point_count: points.len() as i32,
-        center: None,
-        steps,
-    };
-    (points, segment)
+    visits.push(visit(
+        "office",
+        Mode::Car,
+        (8 * 60 + 20 + rng.random_range(-30..30)) * 60,
+    ));
+    visits.push(visit("home", Mode::Car, rng.random_range(45..90) * 60));
+    let roll: f64 = rng.random_range(0.0..1.0);
+    if roll < 0.3 {
+        visits.push(visit("vistula", Mode::Walk, 25 * 60));
+        visits.push(visit("home", Mode::Walk, 0));
+    } else if roll < 0.5 {
+        visits.push(visit("lazienki", Mode::Run, 4 * 60));
+        visits.push(visit("home", Mode::Run, 0));
+    } else if roll < 0.65 {
+        visits.push(visit("kinoteka", Mode::Walk, 150 * 60));
+        visits.push(visit("home", Mode::Walk, 0));
+    } else if roll < 0.8 {
+        visits.push(visit("koszyki", Mode::Walk, 50 * 60));
+        visits.push(visit("home", Mode::Walk, 0));
+    }
+    (7 * 3600 + 50 * 60 + rng.random_range(-15..15) * 60, visits)
 }
 
 /// A stay: a handful of fixes in the first minutes (the warm phase), then nothing.
-fn stop(
+fn stay(
     rng: &mut StdRng,
     at: Geo,
     start: DateTime<Utc>,
@@ -276,102 +323,169 @@ fn stop(
     (points, segment)
 }
 
-/// The places of the made-up life, around the home.
-struct Places {
-    home: Geo,
-    work: Geo,
-    gym: Geo,
-    shop: Geo,
-    park: Geo,
-    lake: Geo,
-}
-
-impl Places {
-    fn around(home: Geo) -> Places {
-        Places {
-            home,
-            work: home.offset(2_100.0, 2_400.0),
-            gym: home.offset(-900.0, 1_100.0),
-            shop: home.offset(500.0, -600.0),
-            park: home.offset(1_500.0, -1_200.0),
-            lake: home.offset(-18_000.0, 16_000.0),
+/// Walks the leg's polyline at the mode's speed, keeping a fix every `spacing` metres or 60 s
+/// as the recorder would, after the first `DOOR_GAP_M` metres the recorder misses.
+fn sample(
+    rng: &mut StdRng,
+    leg: &LegSpec,
+    mode: Mode,
+    start: DateTime<Utc>,
+) -> (Vec<Point>, Segment) {
+    let coordinates: Vec<Geo> = leg
+        .coordinates
+        .iter()
+        .map(|c| Geo {
+            lat: c[0],
+            lon: c[1],
+        })
+        .collect();
+    let mut points: Vec<Point> = Vec::new();
+    let mut time = start;
+    let mut travelled = 0.0;
+    let mut since_last_kept = -DOOR_GAP_M;
+    let mut last_kept_at = start;
+    let mut speed = mode.speed_mps();
+    let mut stretch_left = 0.0;
+    let mut recording = false;
+    let keep = |rng: &mut StdRng,
+                points: &mut Vec<Point>,
+                spot: Geo,
+                time: DateTime<Utc>,
+                speed: f64,
+                course: f64| {
+        let noise = mode.noise_m();
+        let noisy = spot.offset(
+            rng.random_range(-noise..noise),
+            rng.random_range(-noise..noise),
+        );
+        points.push(Point {
+            at: time,
+            geo: noisy,
+            h_acc: rng.random_range(4..16),
+            speed_cms: (speed * 100.0).round() as i16,
+            course: (course.round() as i16).rem_euclid(360),
+            activity: mode.activity(),
+            activity_conf: if rng.random_range(0.0..1.0) < 0.85 {
+                2
+            } else {
+                1
+            },
+        });
+    };
+    for index in 1..coordinates.len() {
+        let from = coordinates[index - 1];
+        let to = coordinates[index];
+        let length = from.distance(to);
+        let course = from.bearing(to);
+        let mut along = 0.0;
+        while along < length {
+            if stretch_left <= 0.0 {
+                speed = mode.speed_mps() * rng.random_range(0.8..1.2);
+                stretch_left = rng.random_range(150.0..300.0);
+            }
+            let step = (mode.spacing_m() - since_last_kept.max(0.0))
+                .min(stretch_left)
+                .min(length - along);
+            along += step;
+            travelled += step;
+            stretch_left -= step;
+            since_last_kept += step;
+            time += Duration::milliseconds((step / speed * 1000.0) as i64);
+            let spot = from.offset(
+                along * course.to_radians().cos(),
+                along * course.to_radians().sin(),
+            );
+            if !recording && since_last_kept >= 0.0 {
+                // The door gap is over: the recorder has its first fix from here on.
+                recording = true;
+                last_kept_at = time;
+            }
+            if recording
+                && (since_last_kept >= mode.spacing_m()
+                    || (time - last_kept_at).num_seconds() >= 60)
+            {
+                keep(rng, &mut points, spot, time, speed, course);
+                last_kept_at = time;
+                since_last_kept = 0.0;
+            }
+        }
+        if mode == Mode::Car && index < coordinates.len() - 1 && rng.random_range(0.0..1.0) < 0.12 {
+            let pause = rng.random_range(15.0..75.0);
+            time += Duration::milliseconds((pause * 1000.0) as i64);
+            if pause >= 60.0 {
+                keep(rng, &mut points, to, time, 0.0, course);
+                last_kept_at = time;
+                since_last_kept = 0.0;
+            }
         }
     }
+    if let Some(last) = coordinates.last()
+        && since_last_kept > 0.0
+    {
+        let course = points.last().map(|p| p.course as f64).unwrap_or(0.0);
+        keep(rng, &mut points, *last, time, speed, course);
+    }
+    let steps = match mode {
+        Mode::Walk => Some((travelled / 0.75) as i32),
+        Mode::Run => Some((travelled / 1.1) as i32),
+        _ => None,
+    };
+    let segment = Segment {
+        kind: "trip",
+        start,
+        end: time,
+        mode: Some(mode),
+        distance_m: travelled.round() as i32,
+        point_count: points.len() as i32,
+        center: None,
+        steps,
+    };
+    (points, segment)
 }
 
 /// One local day, from midnight to midnight, in the day's zone.
-fn day(rng: &mut StdRng, places: &Places, date: NaiveDate, tz: Tz) -> Day {
-    let at = |h: u32, m: u32| -> DateTime<Utc> {
-        tz.from_local_datetime(&date.and_hms_opt(h, m, 0).unwrap())
-            .single()
-            .unwrap()
-            .with_timezone(&Utc)
-    };
-    let midnight = at(0, 0);
+fn day(rng: &mut StdRng, routes: &Routes, date: NaiveDate, tz: Tz) -> Day {
+    let midnight = tz
+        .from_local_datetime(&date.and_hms_opt(0, 0, 0).unwrap())
+        .single()
+        .unwrap()
+        .with_timezone(&Utc);
     let next_midnight = tz
         .from_local_datetime(&(date + Duration::days(1)).and_hms_opt(0, 0, 0).unwrap())
         .single()
         .unwrap()
         .with_timezone(&Utc);
+    let weekend = matches!(date.weekday(), Weekday::Sat | Weekday::Sun);
+    let (departure_s, visits) = plan(rng, weekend);
     let mut points = Vec::new();
     let mut segments = Vec::new();
-    let mut now = midnight;
-    let mut here = places.home;
-    let weekend = matches!(date.weekday(), Weekday::Sat | Weekday::Sun);
-
-    // A plan: (destination, mode there, minutes of stay). The day ends at home.
-    let mut plan: Vec<(Geo, Mode, i64)> = Vec::new();
-    if weekend {
-        match rng.random_range(0..4) {
-            0 => plan.push((places.park, Mode::Walk, 25)),
-            1 => plan.push((places.lake, Mode::Car, 150)),
-            2 => {
-                plan.push((places.park, Mode::Bike, 10));
-                plan.push((places.lake, Mode::Bike, 60));
-            }
-            _ => plan.push((places.park, Mode::Run, 5)),
-        }
-        plan.push((places.shop, Mode::Walk, 20));
-    } else {
-        let commute = if rng.random_range(0.0..1.0) < 0.6 {
-            Mode::Bike
-        } else {
-            Mode::Car
-        };
-        plan.push((places.work, commute, 505 + rng.random_range(-40..40)));
-        if rng.random_range(0.0..1.0) < 0.4 {
-            plan.push((places.gym, Mode::Walk, 70));
-        }
-        if rng.random_range(0.0..1.0) < 0.5 {
-            plan.push((places.shop, Mode::Walk, 15));
-        }
-    }
-    plan.push((places.home, if weekend { Mode::Walk } else { plan[0].1 }, 0));
-
-    let first_departure =
-        if weekend { at(9, 30) } else { at(7, 45) } + Duration::minutes(rng.random_range(-20..20));
-    let (stay_points, stay) = stop(rng, places.home, now, first_departure);
+    let mut now = midnight + Duration::seconds(departure_s);
+    let mut here = "home";
+    let (stay_points, stay_segment) = stay(rng, routes.place("home"), midnight, now);
     points.extend(stay_points);
-    segments.push(stay);
-    now = first_departure;
-
-    for (destination, mode, minutes) in plan {
-        let (trip_points, trip_segment) = trip(rng, here, destination, mode, now);
-        now = trip_segment.end;
-        points.extend(trip_points);
-        segments.push(trip_segment);
-        here = destination;
-        if minutes > 0 {
-            let leave = now + Duration::minutes(minutes);
-            let (stay_points, stay) = stop(rng, here, now, leave);
+    segments.push(stay_segment);
+    for visit in visits {
+        if visit.place != here {
+            let Some(leg) = routes.leg(here, visit.place, visit.mode.leg_mode()) else {
+                continue;
+            };
+            let (trip_points, trip_segment) = sample(rng, leg, visit.mode, now);
+            now = trip_segment.end;
+            points.extend(trip_points);
+            segments.push(trip_segment);
+            here = visit.place;
+        }
+        if visit.stay_s > 0 {
+            let leave = now + Duration::seconds(visit.stay_s);
+            let (stay_points, stay_segment) = stay(rng, routes.place(here), now, leave);
             points.extend(stay_points);
-            segments.push(stay);
+            segments.push(stay_segment);
             now = leave;
         }
     }
-    let (stay_points, stay) = stop(rng, places.home, now, next_midnight);
+    let (stay_points, stay_segment) = stay(rng, routes.place("home"), now, next_midnight);
     points.extend(stay_points);
-    segments.push(stay);
+    segments.push(stay_segment);
     Day { points, segments }
 }
 
@@ -383,11 +497,8 @@ pub async fn run(pool: &PgPool, args: SeedArgs) -> Result<()> {
     if args.days == 0 || args.days > 400 {
         bail!("--days takes 1 to 400");
     }
+    let routes = Routes::load()?;
     let mut rng = StdRng::seed_from_u64(args.seed);
-    let places = Places::around(Geo {
-        lat: args.lat,
-        lon: args.lon,
-    });
 
     let user_id: Uuid = match sqlx::query_scalar("select id from users where email = $1")
         .bind(&args.email)
@@ -442,7 +553,7 @@ pub async fn run(pool: &PgPool, args: SeedArgs) -> Result<()> {
     let mut total_segments = 0usize;
     for offset in 0..args.days as i64 {
         let date = first + Duration::days(offset);
-        let generated = day(&mut rng, &places, date, tz);
+        let generated = day(&mut rng, &routes, date, tz);
         total_points += generated.points.len();
         total_segments += generated.segments.len();
         insert_day(pool, user_id, device_id, &args.tz, &generated)
@@ -557,76 +668,94 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_walk_of_two_kilometres_takes_about_twenty_four_minutes_at_ten_metre_spacing() {
-        let mut rng = StdRng::seed_from_u64(7);
-        let home = Geo {
-            lat: 52.2297,
-            lon: 21.0122,
-        };
-        let (points, segment) = trip(
-            &mut rng,
-            home,
-            home.offset(1_400.0, 1_400.0),
-            Mode::Walk,
-            Utc::now(),
-        );
-        let minutes = (segment.end - segment.start).num_minutes();
-        assert!((18..=32).contains(&minutes), "{minutes} minutes");
-        assert!(
-            points.len() > 150 && points.len() < 260,
-            "{} points",
-            points.len()
-        );
-        assert!(
-            segment.distance_m > 1_900 && segment.distance_m < 2_400,
-            "{} m",
-            segment.distance_m
-        );
-        assert!(segment.steps.unwrap() > 2_000);
+    fn the_routes_fixture_has_every_leg_the_plans_ask_for() {
+        let routes = Routes::load().unwrap();
+        for (from, to, mode) in [
+            ("home", "oldTown", "walk"),
+            ("home", "vistula", "walk"),
+            ("home", "zloteTarasy", "walk"),
+            ("home", "kinoteka", "walk"),
+            ("home", "lazienki", "walk"),
+            ("home", "koszyki", "walk"),
+            ("home", "vistula", "bike"),
+            ("vistula", "lomianki", "bike"),
+            ("home", "office", "car"),
+        ] {
+            assert!(routes.leg(from, to, mode).is_some(), "{from}-{to}-{mode}");
+            assert!(routes.leg(to, from, mode).is_some(), "{to}-{from}-{mode}");
+        }
     }
 
     #[test]
-    fn a_weekday_starts_and_ends_at_home_with_a_stay_at_work() {
+    fn a_walk_to_the_old_town_is_sampled_every_ten_metres_after_the_door_gap() {
+        let routes = Routes::load().unwrap();
+        let leg = routes.leg("home", "oldTown", "walk").unwrap();
+        let mut rng = StdRng::seed_from_u64(3);
+        let start = Utc::now();
+        let (points, segment) = sample(&mut rng, leg, Mode::Walk, start);
+        let minutes = (segment.end - start).num_minutes();
+        assert!(
+            (25..=45).contains(&minutes),
+            "{minutes} minutes for {} m",
+            segment.distance_m
+        );
+        assert!((segment.distance_m as i64 - leg.distance_m).abs() < leg.distance_m / 10);
+        assert!(
+            points.len() as i64 > leg.distance_m / 14 && (points.len() as i64) < leg.distance_m / 8,
+            "{} points",
+            points.len()
+        );
+        assert!((points[0].at - start).num_seconds() > 60);
+        assert!(routes.place("home").distance(points[0].geo) > 80.0);
+        assert!(
+            points
+                .iter()
+                .all(|p| p.activity == 2 && p.speed_cms > 90 && p.speed_cms < 200)
+        );
+    }
+
+    #[test]
+    fn a_weekday_goes_to_the_office_by_car_and_ends_at_home() {
+        let routes = Routes::load().unwrap();
         let mut rng = StdRng::seed_from_u64(1);
-        let places = Places::around(Geo {
-            lat: 52.2297,
-            lon: 21.0122,
-        });
         let generated = day(
             &mut rng,
-            &places,
+            &routes,
             NaiveDate::from_ymd_opt(2026, 10, 7).unwrap(),
             chrono_tz::Europe::Warsaw,
         );
-        let kinds: Vec<&str> = generated.segments.iter().map(|s| s.kind).collect();
-        assert_eq!(kinds.first(), Some(&"stop"));
-        assert_eq!(kinds.last(), Some(&"stop"));
+        assert_eq!(generated.segments.first().map(|s| s.kind), Some("stop"));
+        assert_eq!(generated.segments.last().map(|s| s.kind), Some("stop"));
         assert!(
             generated
                 .segments
                 .iter()
-                .any(|s| s.kind == "stop" && (s.end - s.start).num_minutes() > 400)
+                .any(|s| s.kind == "trip" && s.mode == Some(Mode::Car))
         );
-        let last = generated.segments.last().unwrap();
-        assert!(last.end > last.start);
+        assert!(
+            generated
+                .segments
+                .iter()
+                .any(|s| s.kind == "stop" && (s.end - s.start).num_hours() >= 7)
+        );
+        for pair in generated.segments.windows(2) {
+            assert!(pair[0].end <= pair[1].start + Duration::seconds(1));
+        }
     }
 
     #[test]
-    fn the_same_seed_gives_the_same_month() {
-        let places = Places::around(Geo {
-            lat: 52.2297,
-            lon: 21.0122,
-        });
+    fn the_same_seed_gives_the_same_day() {
+        let routes = Routes::load().unwrap();
         let date = NaiveDate::from_ymd_opt(2026, 10, 3).unwrap();
         let a = day(
             &mut StdRng::seed_from_u64(5),
-            &places,
+            &routes,
             date,
             chrono_tz::Europe::Warsaw,
         );
         let b = day(
             &mut StdRng::seed_from_u64(5),
-            &places,
+            &routes,
             date,
             chrono_tz::Europe::Warsaw,
         );

@@ -13,7 +13,7 @@ There is no cargo and no psql on the host: every command runs in a container.
 cp compose.override.example.yaml compose.override.yaml   # once: the builder stage with the source mounted
 make up            # the database and the service on http://localhost:8090
 make migrate       # apply migrations/ to the local database
-make seed EMAIL=kuba@example.com DAYS=30   # a made-up month to look at
+make seed EMAIL=kuba@example.com DAYS=30   # a made-up month over Warsaw's streets to look at
 make test          # cargo test against a throwaway wdig_test database
 make lint          # clippy, warnings as errors
 make cs            # rustfmt --check

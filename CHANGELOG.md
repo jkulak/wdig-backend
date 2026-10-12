@@ -10,7 +10,9 @@ Lines under `### Internal` are for the repository, not for a release note.
 
 - The service: `GET /api/v1/health` with the database's state and the build's version, the
   schema (accounts, and the tracking tables with `points` partitioned by month), a partition
-  keeper that runs at start and once a day, and `wdig seed`, a made-up month for an account.
+  keeper that runs at start and once a day, and `wdig seed`, a made-up month for an account
+  over Warsaw's real streets (Apple Maps routes in `fixtures/demo_routes.json`, shared with the
+  app's demo month), sampled the way the recorder keeps fixes.
 
 ### Internal
 
