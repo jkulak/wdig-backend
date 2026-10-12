@@ -35,11 +35,11 @@ jobs:
     env:
       DATABASE_URL: postgres://wdig:wdig@localhost:5432/wdig_test
     steps:
-      - uses: actions/checkout@de0fac2e4500dabd0b5ddcfd6ac3f7d8ffbe5b3f # v5.0.0
-      - uses: dtolnay/rust-toolchain@4305c38b25d97ef35a8ad1f985ccf2d2242004f2 # stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable, 2026-10
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@98c8021b550208e191a6a3145459900be58cb16b # v2.8.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Apply the migrations
