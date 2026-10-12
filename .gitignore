@@ -1,0 +1,7 @@
+target/
+.env
+compose.override.yaml
+build/
+.claude/
+issues/
+.DS_Store
