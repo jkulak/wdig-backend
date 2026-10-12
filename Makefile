@@ -27,8 +27,8 @@ build: ## Build the runtime image as a release does
 	$(COMPOSE) -f compose.yaml build app
 
 .PHONY: builder
-builder: ## Build the builder image cargo runs in (once, and after a toolchain change)
-	docker build --target builder -t $(BUILDER) .
+builder: ## Build the toolchain image cargo runs in (once, and after a toolchain change)
+	docker build --target toolchain -t $(BUILDER) .
 
 .PHONY: test
 test: builder ## Run cargo test in the builder image against the stack's database (a wdig_test database it creates and drops)
@@ -71,8 +71,8 @@ partitions: ## Create the next months' partitions of points, as the service does
 	$(COMPOSE) exec app wdig partitions
 
 .PHONY: seed
-seed: ## Write a made-up month for an account: make seed EMAIL=kuba@example.com [DAYS=30] [LAT=52.2297 LON=21.0122] [TZ=Europe/Warsaw]
-	$(COMPOSE) exec app wdig seed --email "$(EMAIL)" --days $(or $(DAYS),30) --lat $(or $(LAT),52.2297) --lon $(or $(LON),21.0122) --tz $(or $(TZ),Europe/Warsaw) --replace
+seed: ## Write a made-up month over Warsaw's streets for an account: make seed EMAIL=kuba@example.com [DAYS=30] [TZ=Europe/Warsaw] [SEED=1]
+	$(COMPOSE) exec app wdig seed --email "$(EMAIL)" --days $(or $(DAYS),30) --tz $(or $(TZ),Europe/Warsaw) --seed $(or $(SEED),1) --replace
 
 .PHONY: smoke
 smoke: ## Ask the local stack for its health, as the release's smoke test asks production

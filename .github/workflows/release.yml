@@ -1,0 +1,154 @@
+name: Release
+
+# Every merge to main, released and rolled out: the next vYYYY.MM.PATCH tag on the merge
+# commit, a release whose note is what CHANGELOG.md gained since the release before, and the
+# deploy workflow dispatched against that tag. From gcloud-ovh-migrate's service template, word
+# for word the same in every service (CONTRACT.md §6 there).
+#
+# The deploy is dispatched rather than left to the release's own event: a release published
+# with this run's GITHUB_TOKEN starts no other workflow, and workflow_dispatch is the exception.
+# Dispatched against the tag, it runs as it does for a release cut by hand: its plan job, the
+# production environment and ci-deploy on the host each see a release tag. This workflow holds
+# no secret and never reaches the deploy key.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write      # the tag and the release
+  actions: write       # dispatching the deploy
+  pull-requests: read  # which pull request the merge came from
+  checks: read         # and whether its checks passed
+  statuses: read
+
+# One release at a time, in the order of the merges, and none stopped halfway: a tag with no
+# deploy behind it is worse than a release that waits. A merge still waiting when a newer one
+# arrives goes out as part of the newer one.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Release and roll out
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      SHA: ${{ github.sha }}
+    steps:
+      # All of history and every tag: the name counts the month's tags, and the note reads the
+      # changelog as the release before had it.
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+
+      # Only a merge whose pull request passed every check is released: a red one stops here,
+      # before anything is tagged, whatever let it merge. Checks still running are waited for,
+      # ten minutes at most.
+      - name: Refuse a merge whose pull request did not pass
+        id: pr
+        run: |
+          # The pull request the commit came from, by a merge, a squash or a rebase. GitHub can
+          # take a few seconds to link a fresh merge to it, so a minute passes before "none".
+          for attempt in $(seq 1 7); do
+            pr=$(gh api "repos/$REPO/commits/$SHA/pulls" \
+                   --jq '[.[] | select(.merged_at != null and .base.ref == "main")][0].number // empty')
+            [ -n "$pr" ] || [ "$attempt" -eq 7 ] || { sleep 10; continue; }
+            break
+          done
+          if [ -z "$pr" ]; then
+            echo "::error::$SHA reached main without a pull request, so nothing tested it as merged"
+            echo "releasing it is a person's call: gh release create"
+            exit 1
+          fi
+          echo "number=$pr" >> "$GITHUB_OUTPUT"
+          head=$(gh api "repos/$REPO/pulls/$pr" --jq .head.sha)
+          for attempt in $(seq 1 30); do
+            # The latest run of each check and the latest state of each status on the pull
+            # request's last commit, this run's own left out: ok, pending, or what went wrong.
+            # Each read on its own line, so one GitHub cannot answer stops the step rather than
+            # leaving its checks out.
+            runs=$(gh api --paginate "repos/$REPO/commits/$head/check-runs?per_page=100" --jq '
+              .check_runs[]
+              | select((.details_url // "") | contains("/runs/" + env.GITHUB_RUN_ID + "/") | not)
+              | [.name, (if .status != "completed" then "pending"
+                         elif .conclusion == "success" or .conclusion == "neutral" or .conclusion == "skipped" then "ok"
+                         else .conclusion end)]
+              | @tsv')
+            states=$(gh api "repos/$REPO/commits/$head/status" --jq '
+              .statuses[] | [.context, (if .state == "success" then "ok" else .state end)] | @tsv')
+            checks=$(printf '%s\n%s\n' "$runs" "$states" | grep . || true)
+            failed=$(awk -F'\t' 'NF && $2 != "ok" && $2 != "pending" { printf "  %s: %s\n", $1, $2 }' <<<"$checks")
+            pending=$(awk -F'\t' '$2 == "pending" { printf "  %s\n", $1 }' <<<"$checks")
+            if [ -n "$failed" ]; then
+              echo "::error::pull request #$pr has checks that did not pass, so this merge is not released"
+              echo "$failed"
+              exit 1
+            fi
+            if [ -z "$pending" ]; then
+              echo "pull request #$pr: none of its $(grep -c . <<<"$checks" || true) check(s) failed"
+              exit 0
+            fi
+            echo "waiting for pull request #$pr's checks, $attempt of 30, 20 s apart:"
+            echo "$pending"
+            sleep 20
+          done
+          echo "::error::pull request #$pr still has checks running after ten minutes, so this merge is not released"
+          echo "$pending"
+          exit 1
+
+      # vYYYY.MM.PATCH: the month in Europe/Warsaw, the host's timers' zone, and one past the
+      # month's highest counter. Tags of other shapes are no counter, but a counter-shaped one
+      # counts whatever it meant, so no name is ever taken twice. A commit already released, by
+      # an earlier run, keeps its tag and is deployed again.
+      - name: Name the release
+        id: name
+        run: |
+          have=$(git tag --points-at "$SHA" -l 'v*' | head -1)
+          if [ -n "$have" ]; then
+            printf 'tag=%s\nfresh=false\n' "$have" >> "$GITHUB_OUTPUT"
+            echo "$SHA is already $have: deploying it again"
+            exit 0
+          fi
+          month=$(TZ=Europe/Warsaw date +%Y.%m)
+          highest=-1
+          for tag in $(git tag -l "v$month.*"); do
+            n=${tag#"v$month."}
+            if [[ $n =~ ^[0-9]+$ ]] && (( 10#$n > highest )); then highest=$((10#$n)); fi
+          done
+          tag="v$month.$((highest + 1))"
+          printf 'tag=%s\nfresh=true\n' "$tag" >> "$GITHUB_OUTPUT"
+          echo "this merge is $tag"
+
+      # Against the release GitHub calls latest, which is the one before: this workflow marks
+      # each of its releases latest as it publishes it.
+      - name: Write the note
+        if: steps.name.outputs.fresh == 'true'
+        run: |
+          previous=$(gh release view --json tagName --jq .tagName 2>/dev/null || true)
+          python3 scripts/release-notes.py ${previous:+"$previous"} > "$RUNNER_TEMP/notes.md"
+          echo "the note, against ${previous:-no release before}:"
+          cat "$RUNNER_TEMP/notes.md"
+
+      - name: Publish the release
+        if: steps.name.outputs.fresh == 'true'
+        env:
+          TAG: ${{ steps.name.outputs.tag }}
+        run: gh release create "$TAG" --target "$SHA" --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md" --latest
+
+      # deploy.yml builds the images at the tag, rolls them out and smoke-tests them, and puts the
+      # release before back when that fails: a run of its own, under Actions.
+      - name: Roll it out
+        env:
+          TAG: ${{ steps.name.outputs.tag }}
+        run: gh workflow run deploy.yml --ref "$TAG"
+
+      - name: Release summary
+        env:
+          TAG: ${{ steps.name.outputs.tag }}
+          PR: ${{ steps.pr.outputs.number }}
+        run: |
+          echo "### $TAG, from pull request #$PR, its deploy dispatched" >> "$GITHUB_STEP_SUMMARY"

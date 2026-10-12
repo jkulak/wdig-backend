@@ -1,11 +1,16 @@
 # Two stages: the builder compiles with the stable toolchain on Debian 13; the runtime is a
 # slim Debian 13 with the binary, CA certificates and wget for the compose healthcheck, run
 # as a user of its own. Development runs the builder stage with the source mounted.
-FROM rust:1-slim-trixie AS builder
+# The toolchain stage is what `make lint`, `make test` and `make cs` run cargo in, with the
+# source mounted; the builder stage compiles the release on top of it.
+FROM rust:1-slim-trixie AS toolchain
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends pkg-config && rm -rf /var/lib/apt/lists/*
+
+FROM toolchain AS builder
 COPY Cargo.toml Cargo.lock* rust-toolchain.toml ./
 COPY src ./src
+COPY fixtures ./fixtures
 ARG APP_VERSION
 ARG GIT_SHA
 ENV APP_VERSION=${APP_VERSION} GIT_SHA=${GIT_SHA}
