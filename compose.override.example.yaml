@@ -1,0 +1,17 @@
+# Development: the builder stage with the source mounted and `cargo run`, so a change needs
+# `make up` again and no image rebuild. The registry and target caches live in volumes.
+services:
+  app:
+    build:
+      target: builder
+    command: ["cargo", "run", "--", "serve"]
+    volumes:
+      - ./:/app
+      - cargo_registry:/usr/local/cargo/registry
+      - cargo_target:/app/target
+    environment:
+      LOG_FORMAT: pretty
+
+volumes:
+  cargo_registry:
+  cargo_target:

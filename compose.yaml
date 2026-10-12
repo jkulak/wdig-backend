@@ -1,0 +1,37 @@
+# The development stack: the database and the service, as the release runs them. Copy
+# compose.override.example.yaml to compose.override.yaml to run the builder stage with the
+# source mounted instead of the built image.
+name: wdig-backend
+
+services:
+  db:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: wdig
+      POSTGRES_PASSWORD: wdig
+      POSTGRES_DB: wdig
+    volumes:
+      - db_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wdig -d wdig"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  app:
+    build:
+      context: .
+      target: runtime
+    environment:
+      DATABASE_URL: postgres://wdig:wdig@db:5432/wdig
+      BIND_ADDR: 0.0.0.0:8080
+      APP_ENV: development
+      RUST_LOG: info
+    ports:
+      - "8090:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  db_data:

@@ -1,0 +1,72 @@
+# wdig on the shared OVH host, started from gcloud-ovh-migrate's service template. The
+# rules it follows are that repo's CONTRACT.md. `make ovh-install` copies this file to
+# /srv/wdig/compose.yaml; images roll out from CI with `deploy wdig <tag>`, which
+# records the tags in /srv/wdig/.env and nothing else. Every secret reaches compose
+# through `sops exec-env` on wdig.enc.env, never a file. What the app logs is one JSON
+# object per line on stdout or stderr (CONTRACT.md §9), which `make ovh-stack-test` checks.
+#
+# The request path runs in two colours, blue and green (CONTRACT.md §2). A deploy starts the
+# idle one on the new tag beside the live one and moves the edge to it once it is healthy, so
+# no request waits on a release (§6). What must not run twice — a database, a worker taking
+# jobs from a queue — goes below the colours, once.
+name: wdig
+
+# All that both colours share. YAML's merge takes a key whole, not merged into, so a colour
+# that sets its own `environment` or `labels` replaces these: keep what differs to the tag,
+# the labels and the networks below.
+x-web: &web
+  restart: unless-stopped
+  environment:
+    PORT: "8080"
+    # Every secret by name, from wdig.enc.env, required so a stack that lost one fails
+    # to start instead of running without it:
+    # API_KEY: ${API_KEY:?}
+  # A colour takes requests only once this passes, and one that never does is stopped without
+  # ever having taken one (CONTRACT.md §6). It has to ask what the service needs to serve,
+  # through a tool the image has: wget here, which busybox and Debian images carry.
+  healthcheck:
+    test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/api/v1/health || exit 1"]
+    interval: 10s
+    timeout: 5s
+    retries: 3
+    start_period: 60s
+  # One container that leaks must not take the host and every other service with it.
+  mem_limit: 256m
+
+services:
+  web-blue:
+    <<: *web
+    # Each colour on its own tag, so deploying one leaves the other as it is. The fallback lets
+    # the file render before its first deploy in colours, for a scheduled job too.
+    image: ghcr.io/jkulak/wdig:${IMAGE_TAG_BLUE:-${IMAGE_TAG:?}}
+    labels:
+      deploy.colour: blue
+      # Where the edge sends wdig while blue is live: blue's alias on the edge, and port.
+      deploy.upstream: wdig-blue-web:8080
+      # What the host's nightly backup takes, as compose's volume keys this container mounts
+      # (CONTRACT.md §8); both colours may name a volume, and it is taken once. A database
+      # container says so with backup.postgres or backup.mariadb.
+      # backup.volumes: data
+    networks:
+      default: {}
+      edge:
+        # Unique on the shared network: compose also gives every container its bare service
+        # name there, and another service's `web-blue` would answer half the requests.
+        aliases: [wdig-blue-web]
+
+  web-green:
+    <<: *web
+    image: ghcr.io/jkulak/wdig:${IMAGE_TAG_GREEN:-${IMAGE_TAG:?}}
+    labels:
+      deploy.colour: green
+      deploy.upstream: wdig-green-web:8080
+      # backup.volumes: data
+    networks:
+      default: {}
+      edge:
+        aliases: [wdig-green-web]
+
+networks:
+  edge:
+    external: true
+    name: edge

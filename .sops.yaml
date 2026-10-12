@@ -1,0 +1,16 @@
+# Who can open this service's secrets on the shared OVH host. Public keys only, safe to
+# commit, from the creation rule gcloud-ovh-migrate's own .sops.yaml gives every service
+# (its CONTRACT.md §4):
+#
+#   host      private half only at /etc/sops/age.key on the host — what decrypts the stack's
+#             secrets when it starts;
+#   personal  private half on the Mac, with a copy in the password manager — what edits them,
+#             and what recovers them if the host is lost.
+#
+# One key group holding both, so either key alone opens a file.
+creation_rules:
+  - path_regex: deploy/ovh/[^/]+\.enc\.env$
+    key_groups:
+      - age:
+          - age1exkyfdx2f5rw6awdymzxawacqxmmt98xahupyjqp4fqn8xyc9psq0cjdgq  # host
+          - age1u340n9vw4amnu6clpl98n2aeeg3qrdf9sr0fey40x6dc3lyk349s8uq76k  # personal
