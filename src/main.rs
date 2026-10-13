@@ -8,6 +8,7 @@ mod config;
 mod db;
 mod errors;
 mod health;
+mod ingest;
 mod logging;
 mod partitions;
 mod ratelimit;
