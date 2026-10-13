@@ -1,11 +1,16 @@
 //! The WDIG backend: one binary, `wdig`, with the service as its default command and the
 //! operator's jobs as subcommands, so the same image serves and runs one-off work.
 
+mod accounts;
+mod app;
+mod auth;
 mod config;
 mod db;
+mod errors;
 mod health;
 mod logging;
 mod partitions;
+mod ratelimit;
 mod seed;
 
 use anyhow::Result;
@@ -33,6 +38,11 @@ enum Command {
     },
     /// Write a month of made-up points and segments for an account, to look at before any phone has recorded
     Seed(seed::SeedArgs),
+    /// Make invite codes for registration and print them, one per line
+    Invite {
+        #[arg(long, default_value_t = 1)]
+        count: u32,
+    },
 }
 
 #[tokio::main]
@@ -52,13 +62,21 @@ async fn main() -> Result<()> {
             let pool = db::connect(&config).await?;
             seed::run(&pool, args).await
         }
+        Command::Invite { count } => {
+            let pool = db::connect(&config).await?;
+            for code in accounts::make_invites(&pool, count).await? {
+                println!("{code}");
+            }
+            Ok(())
+        }
     }
 }
 
 async fn serve(config: config::Config) -> Result<()> {
+    config.check_for_serving()?;
     let pool = db::connect(&config).await?;
     partitions::spawn_keeper(pool.clone());
-    let app = health::router(pool, config.version.clone());
+    let app = app::router(app::AppState::new(pool, &config));
     let listener = tokio::net::TcpListener::bind(&config.bind_addr).await?;
     tracing::info!(addr = %config.bind_addr, version = %config.version, "listening");
     axum::serve(listener, app)

@@ -6,13 +6,8 @@ use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::Serialize;
-use sqlx::PgPool;
 
-#[derive(Clone)]
-pub struct AppState {
-    pub pool: PgPool,
-    pub version: String,
-}
+use crate::app::AppState;
 
 #[derive(Serialize)]
 pub struct Health {
@@ -21,10 +16,8 @@ pub struct Health {
     pub version: String,
 }
 
-pub fn router(pool: PgPool, version: String) -> Router {
-    Router::new()
-        .route("/api/v1/health", get(health))
-        .with_state(AppState { pool, version })
+pub fn router() -> Router<AppState> {
+    Router::new().route("/api/v1/health", get(health))
 }
 
 async fn health(State(state): State<AppState>) -> (StatusCode, Json<Health>) {
@@ -37,7 +30,7 @@ async fn health(State(state): State<AppState>) -> (StatusCode, Json<Health>) {
             Json(Health {
                 status: "ok",
                 db: "ok",
-                version: state.version,
+                version: state.version.clone(),
             }),
         ),
         Err(error) => {
@@ -47,7 +40,7 @@ async fn health(State(state): State<AppState>) -> (StatusCode, Json<Health>) {
                 Json(Health {
                     status: "degraded",
                     db: "unavailable",
-                    version: state.version,
+                    version: state.version.clone(),
                 }),
             )
         }

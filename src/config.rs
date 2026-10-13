@@ -11,9 +11,23 @@ pub struct Config {
     pub rust_log: String,
     /// The crate version plus the build's git sha or release tag, for `/health`.
     pub version: String,
+    /// Signs the access tokens; at least 32 bytes, required to serve.
+    pub token_signing_key: String,
+    pub access_token_ttl_seconds: i64,
+    pub refresh_token_ttl_days: i64,
 }
 
 impl Config {
+    /// What `serve` needs beyond the database.
+    pub fn check_for_serving(&self) -> Result<()> {
+        if self.token_signing_key.len() < 32 {
+            anyhow::bail!(
+                "TOKEN_SIGNING_KEY is missing or shorter than 32 bytes; the service cannot sign tokens"
+            );
+        }
+        Ok(())
+    }
+
     pub fn from_env() -> Result<Self> {
         let database_url = std::env::var("DATABASE_URL")
             .context("DATABASE_URL is not set; the service cannot start without its database")?;
@@ -27,7 +41,17 @@ impl Config {
                     .unwrap_or("dev");
                 format!("{}+{sha}", env!("CARGO_PKG_VERSION"))
             });
+        let token_signing_key = std::env::var("TOKEN_SIGNING_KEY").unwrap_or_default();
         Ok(Self {
+            token_signing_key,
+            access_token_ttl_seconds: std::env::var("ACCESS_TOKEN_TTL_SECONDS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(900),
+            refresh_token_ttl_days: std::env::var("REFRESH_TOKEN_TTL_DAYS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(90),
             database_url,
             bind_addr: std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string()),
             app_env: std::env::var("APP_ENV").unwrap_or_else(|_| "production".to_string()),

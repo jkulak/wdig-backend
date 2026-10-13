@@ -11,4 +11,5 @@ MIGRATE_DB=wdig_test ./scripts/migrate.sh up >/dev/null
 docker run --rm -v "$PWD:/app" -v wdig-backend-cargo-registry:/usr/local/cargo/registry \
   -v wdig-backend-cargo-target:/app/target -w /app --network wdig-backend_default \
   -e DATABASE_URL=postgres://wdig:wdig@db:5432/wdig_test \
+  -e TOKEN_SIGNING_KEY=test-signing-key-of-at-least-thirty-two-bytes \
   wdig-backend-builder cargo test "$@"

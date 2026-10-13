@@ -500,7 +500,7 @@ pub async fn run(pool: &PgPool, args: SeedArgs) -> Result<()> {
     let routes = Routes::load()?;
     let mut rng = StdRng::seed_from_u64(args.seed);
 
-    let user_id: Uuid = match sqlx::query_scalar("select id from users where email = $1")
+    let user_id: Uuid = match sqlx::query_scalar("select id from users where email = $1::citext")
         .bind(&args.email)
         .fetch_optional(pool)
         .await?
