@@ -5,15 +5,11 @@
 // The included modules carry what the binary uses and the tests do not.
 #![allow(dead_code)]
 
-use std::net::SocketAddr;
-
-use axum::body::Body;
-use axum::extract::connect_info::MockConnectInfo;
-use axum::http::{Request, StatusCode};
-use http_body_util::BodyExt;
+use axum::http::StatusCode;
 use serde_json::{Value, json};
-use tower::ServiceExt;
 use uuid::Uuid;
+
+mod common;
 
 #[path = "../src/accounts.rs"]
 mod accounts;
@@ -27,63 +23,12 @@ mod config;
 mod errors;
 #[path = "../src/health.rs"]
 mod health;
+#[path = "../src/ingest.rs"]
+mod ingest;
 #[path = "../src/ratelimit.rs"]
 mod ratelimit;
 
-async fn test_app() -> (axum::Router, sqlx::PgPool) {
-    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL for the test database");
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&url)
-        .await
-        .expect("the test database");
-    let config = config::Config::from_env().unwrap();
-    assert!(
-        config.check_for_serving().is_ok(),
-        "TOKEN_SIGNING_KEY for the tests"
-    );
-    let state = app::AppState::new(pool.clone(), &config);
-    let router =
-        app::router(state).layer(MockConnectInfo(SocketAddr::from(([127, 0, 0, 1], 4000))));
-    (router, pool)
-}
-
-async fn call(
-    router: &axum::Router,
-    method: &str,
-    path: &str,
-    body: Value,
-    bearer: Option<&str>,
-) -> (StatusCode, Value) {
-    let mut request = Request::builder()
-        .method(method)
-        .uri(path)
-        .header("content-type", "application/json");
-    if let Some(token) = bearer {
-        request = request.header("authorization", format!("Bearer {token}"));
-    }
-    let response = router
-        .clone()
-        .oneshot(request.body(Body::from(body.to_string())).unwrap())
-        .await
-        .unwrap();
-    let status = response.status();
-    let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    let value = if bytes.is_empty() {
-        Value::Null
-    } else {
-        serde_json::from_slice(&bytes).unwrap_or(Value::Null)
-    };
-    (status, value)
-}
-
-fn device(id: Uuid) -> Value {
-    json!({"id": id, "name": "iPhone15,2", "platform": "ios", "app_version": "0.1.0 (1)"})
-}
-
-fn fresh_email() -> String {
-    format!("kuba+{}@example.com", Uuid::now_v7().simple())
-}
+use common::*;
 
 #[tokio::test]
 async fn register_login_refresh_and_logout_work_in_that_order() {

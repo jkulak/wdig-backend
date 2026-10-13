@@ -8,6 +8,12 @@ Lines under `### Internal` are for the repository, not for a release note.
 
 ### Added
 
+- The ingest API: `POST /api/v1/points/batches` stores a batch of the phone's points once,
+  whatever the number of retries (a replayed batch id answers the first counts and stores
+  nothing, a point already there is a duplicate), and `PUT /api/v1/segments`, `/corrections`,
+  `/places` and `/markers` upsert rows by id with the phone's `updated_at` deciding and the
+  server's `synced_at` recording when; every field checked at the door with the row and the
+  field named in the 422; 120 requests a minute per account.
 - The accounts API: `POST /api/v1/auth/register` with an invite code (`wdig invite --count N`
   prints them), `login` that registers the phone and issues an access token (15 min, HS256) with
   a refresh token (90 days, rotated on every `refresh`, revoked by `logout`), argon2id passwords,

@@ -1,4 +1,5 @@
-//! One error body for the whole API: `{"error": {"code": "...", "message": "..."}}`.
+//! One error body for the whole API: `{"error": {"code": "...", "message": "..."}}`, plus
+//! `index` and `field` when a row of a batch is what is wrong.
 
 use axum::Json;
 use axum::http::StatusCode;
@@ -11,6 +12,8 @@ pub struct ApiError {
     pub code: &'static str,
     pub message: String,
     pub retry_after: Option<u64>,
+    pub index: Option<usize>,
+    pub field: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -22,6 +25,10 @@ struct Body<'a> {
 struct Inner<'a> {
     code: &'a str,
     message: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    index: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    field: Option<&'a str>,
 }
 
 impl ApiError {
@@ -31,6 +38,25 @@ impl ApiError {
             code,
             message: message.into(),
             retry_after: None,
+            index: None,
+            field: None,
+        }
+    }
+
+    /// A 422 naming the first row of a batch that is wrong, and its field.
+    pub fn invalid_row(
+        code: &'static str,
+        index: usize,
+        field: &str,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code,
+            message: message.into(),
+            retry_after: None,
+            index: Some(index),
+            field: Some(field.to_string()),
         }
     }
 
@@ -48,6 +74,8 @@ impl ApiError {
             code: "rate_limited",
             message: "too many requests; try again later".into(),
             retry_after: Some(retry_after),
+            index: None,
+            field: None,
         }
     }
 
@@ -73,6 +101,8 @@ impl IntoResponse for ApiError {
             error: Inner {
                 code: self.code,
                 message: &self.message,
+                index: self.index,
+                field: self.field.as_deref(),
             },
         });
         let mut response = (self.status, body).into_response();
