@@ -7,11 +7,13 @@ mod auth;
 mod config;
 mod db;
 mod errors;
+mod geo;
 mod health;
 mod ingest;
 mod logging;
 mod partitions;
 mod ratelimit;
+mod read;
 mod seed;
 
 use anyhow::Result;

@@ -88,6 +88,8 @@ pub struct Account {
     pub token: String,
     pub device_id: Uuid,
     pub user_id: Uuid,
+    pub email: String,
+    pub password: String,
 }
 
 pub async fn signed_in(router: &axum::Router, pool: &sqlx::PgPool) -> Account {
@@ -122,5 +124,28 @@ pub async fn signed_in(router: &axum::Router, pool: &sqlx::PgPool) -> Account {
         token: body["access_token"].as_str().unwrap().to_string(),
         device_id,
         user_id,
+        email,
+        password: password.to_string(),
+    }
+}
+
+/// The same account signed in on a second phone.
+pub async fn another_device(router: &axum::Router, account: &Account) -> Account {
+    let device_id = Uuid::now_v7();
+    let (status, body) = call(
+        router,
+        "POST",
+        "/api/v1/auth/login",
+        json!({"email": account.email, "password": account.password, "device": device(device_id)}),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    Account {
+        token: body["access_token"].as_str().unwrap().to_string(),
+        device_id,
+        user_id: account.user_id,
+        email: account.email.clone(),
+        password: account.password.clone(),
     }
 }

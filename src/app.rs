@@ -7,7 +7,7 @@ use sqlx::PgPool;
 
 use crate::config::Config;
 use crate::ratelimit::RateLimiter;
-use crate::{accounts, health, ingest};
+use crate::{accounts, health, ingest, read};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -39,5 +39,6 @@ pub fn router(state: AppState) -> Router {
         .merge(health::router())
         .merge(accounts::router())
         .merge(ingest::router())
+        .merge(read::router())
         .with_state(state)
 }
