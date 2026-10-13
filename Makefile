@@ -74,6 +74,10 @@ partitions: ## Create the next months' partitions of points, as the service does
 seed: ## Write a made-up month over Warsaw's streets for an account: make seed EMAIL=kuba@example.com [DAYS=30] [TZ=Europe/Warsaw] [SEED=1]
 	$(COMPOSE) exec app wdig seed --email "$(EMAIL)" --days $(or $(DAYS),30) --tz $(or $(TZ),Europe/Warsaw) --seed $(or $(SEED),1) --replace
 
+.PHONY: invite
+invite: ## Make invite codes for registration and print them: make invite [N=5]
+	$(COMPOSE) exec app wdig invite --count $(or $(N),1)
+
 .PHONY: smoke
 smoke: ## Ask the local stack for its health, as the release's smoke test asks production
 	SMOKE_URL=http://localhost:8090 ./deploy/ovh/smoke.sh

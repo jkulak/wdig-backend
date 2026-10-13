@@ -27,6 +27,8 @@ services:
       BIND_ADDR: 0.0.0.0:8080
       APP_ENV: development
       RUST_LOG: info
+      # Development only; production's is a secret in deploy/ovh/wdig.enc.env.
+      TOKEN_SIGNING_KEY: development-signing-key-not-for-production-0123456789
     ports:
       - "8090:8080"
     depends_on:

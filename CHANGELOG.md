@@ -8,6 +8,11 @@ Lines under `### Internal` are for the repository, not for a release note.
 
 ### Added
 
+- The accounts API: `POST /api/v1/auth/register` with an invite code (`wdig invite --count N`
+  prints them), `login` that registers the phone and issues an access token (15 min, HS256) with
+  a refresh token (90 days, rotated on every `refresh`, revoked by `logout`), argon2id passwords,
+  the same answer and time for a wrong e-mail and a wrong password, and a login limit per
+  address and per account.
 - The service: `GET /api/v1/health` with the database's state and the build's version, the
   schema (accounts, and the tracking tables with `points` partitioned by month), a partition
   keeper that runs at start and once a day, and `wdig seed`, a made-up month for an account

@@ -11,11 +11,15 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
+argon2 = "0.5"
 axum = "0.8"
+base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
 clap = { version = "4", features = ["derive"] }
+jsonwebtoken = "9"
 rand = "0.9"
+sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "macros"] }
@@ -23,6 +27,10 @@ tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt", "std"] }
 uuid = { version = "1", features = ["v7", "serde"] }
+
+[dev-dependencies]
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
 
 [profile.release]
 lto = "thin"
