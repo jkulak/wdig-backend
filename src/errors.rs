@@ -43,6 +43,18 @@ impl ApiError {
         }
     }
 
+    /// A 400 naming the query parameter that is wrong.
+    pub fn bad_param(field: &str, message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "validation",
+            message: message.into(),
+            retry_after: None,
+            index: None,
+            field: Some(field.to_string()),
+        }
+    }
+
     /// A 422 naming the first row of a batch that is wrong, and its field.
     pub fn invalid_row(
         code: &'static str,

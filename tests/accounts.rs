@@ -21,12 +21,16 @@ mod auth;
 mod config;
 #[path = "../src/errors.rs"]
 mod errors;
+#[path = "../src/geo.rs"]
+mod geo;
 #[path = "../src/health.rs"]
 mod health;
 #[path = "../src/ingest.rs"]
 mod ingest;
 #[path = "../src/ratelimit.rs"]
 mod ratelimit;
+#[path = "../src/read.rs"]
+mod read;
 
 use common::*;
 

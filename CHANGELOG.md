@@ -8,6 +8,13 @@ Lines under `### Internal` are for the repository, not for a release note.
 
 ### Added
 
+- The read API: `GET /api/v1/days` with one summary per local day that has data (a trip
+  over midnight counts on both days, its distance split by the time on each side),
+  `GET /api/v1/days/{date}` with the day's segments whole and its points reduced group by
+  group with Douglas-Peucker (`tolerance_m`, 10 m by default), `GET /api/v1/points` in
+  pages of up to 20000 behind an exact cursor, and `GET /api/v1/sync/changes`, the four
+  upsert tables in one stream by the server's `synced_at`, with the `server_time` to ask
+  from next.
 - The ingest API: `POST /api/v1/points/batches` stores a batch of the phone's points once,
   whatever the number of retries (a replayed batch id answers the first counts and stores
   nothing, a point already there is a duplicate), and `PUT /api/v1/segments`, `/corrections`,
