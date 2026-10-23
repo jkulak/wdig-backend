@@ -37,3 +37,7 @@ Lines under `### Internal` are for the repository, not for a release note.
 - Rust stable on Debian 13 (`rust:1-slim-trixie`, `debian:trixie-slim`), Postgres 18, logs as
   one JSON object per line with `time`, `level` and `msg`; plain-SQL migrations with a `down`
   each, applied by `scripts/migrate.sh`; one CI job on pull requests.
+
+- `make ovh-secrets-show` answers on a secrets file with no secret in it.
+  `scripts/secrets.sh` is the shared one again (jkulak/gcloud-ovh-migrate#171): on a file of
+  sops metadata alone it says so on stderr and exits 0, where it printed nothing and failed.
