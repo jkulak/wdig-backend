@@ -74,7 +74,13 @@ case "$cmd" in
   show)
     # Variable names only. Printing a decrypted value to a terminal puts it in scrollback
     # and in any terminal log, which is exactly what SECRETS.md is avoiding.
-    grep -oE '^[A-Za-z_][A-Za-z0-9_]*' "$file" | grep -v '^sops_' | sort -u
+    if [ ! -f "$file" ] || [ ! -r "$file" ]; then echo "x $file is not there, or cannot be read" >&2; exit 1; fi
+    # A service with no secrets keeps a file of sops metadata alone. No names is then the
+    # answer, not a failure, and it is said on stderr so that stdout stays a list of names.
+    names=$(grep -oE '^[A-Za-z_][A-Za-z0-9_]*' "$file" | grep -v '^sops_' | sort -u || true)
+    if [ -n "$names" ]; then printf '%s\n' "$names"
+    else echo "$file holds no secret, only sops metadata" >&2
+    fi
     ;;
   *)
     usage
